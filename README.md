@@ -24,3 +24,17 @@
 ```bash
 sudo apt update
 sudo apt install ffmpeg -y
+
+2. Λήψη & Setup
+Bash
+
+git clone [https://github.com/CrazyAlex15/CrazyMusic.git](https://github.com/CrazyAlex15/CrazyMusic.git)
+cd CrazyMusic
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+3. Εκκίνηση
+Bash
+
+python main.py
+Developed with ❤️ by CrazyAlex
