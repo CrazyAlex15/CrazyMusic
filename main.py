@@ -20,9 +20,11 @@ YTDL_OPTIONS = {
     'noplaylist': True,
     'quiet': True,
     'default_search': 'auto',
-    'source_address': '0.0.0.0', 
+    'source_address': '0.0.0.0',
+    'nocheckcertificate': True, # Βοηθάει καμιά φορά στο Linux
 }
 
+# ΣΗΜΑΝΤΙΚΟ: Το executable path είναι για Raspberry Pi / Linux
 FFMPEG_OPTIONS = {
     'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
     'options': '-vn',
@@ -72,24 +74,31 @@ class MusicControls(discord.ui.View):
             
         if vc:
             await vc.disconnect()
-            del voice_clients[guild_id]
+            if guild_id in voice_clients:
+                del voice_clients[guild_id]
             await interaction.response.send_message("⏹️ Σταμάτησα και βγήκα.", ephemeral=True)
 
 # --- HELPER FUNCTIONS ---
 def play_next(guild_id, ctx):
     if guild_id in queues and len(queues[guild_id]) > 0:
         url, title = queues[guild_id].pop(0)
-        vc = voice_clients[guild_id]
         
-        def after_playing(error):
-            if error: print(f"Error: {error}")
-            play_next(guild_id, ctx)
+        if guild_id in voice_clients:
+            vc = voice_clients[guild_id]
+            
+            def after_playing(error):
+                if error: print(f"Error: {error}")
+                play_next(guild_id, ctx)
 
-        source = discord.FFmpegPCMAudio(url, **FFMPEG_OPTIONS)
-        vc.play(source, after=after_playing)
-        
-        coro = ctx.channel.send(f"🎶 Τώρα παίζει: **{title}**")
-        asyncio.run_coroutine_threadsafe(coro, client.loop)
+            # ΕΔΩ ΕΙΝΑΙ Η ΒΑΣΙΚΗ ΑΛΛΑΓΗ ΓΙΑ ΤΟ RASPBERRY PI
+            try:
+                source = discord.FFmpegPCMAudio(url, executable="/usr/bin/ffmpeg", **FFMPEG_OPTIONS)
+                vc.play(source, after=after_playing)
+                
+                coro = ctx.channel.send(f"🎶 Τώρα παίζει: **{title}**")
+                asyncio.run_coroutine_threadsafe(coro, client.loop)
+            except Exception as e:
+                print(f"FFmpeg Error in play_next: {e}")
 
 # --- COMMANDS ---
 @client.tree.command(name="play", description="Παίζει μουσική από YouTube (Link ή Αναζήτηση)")
@@ -131,7 +140,8 @@ async def play(interaction: discord.Interaction, query: str):
             embed.set_thumbnail(url=thumbnail)
             await interaction.followup.send(embed=embed)
         else:
-            source = discord.FFmpegPCMAudio(song_url, **FFMPEG_OPTIONS)
+            # ΚΑΙ ΕΔΩ Η ΑΛΛΑΓΗ ΓΙΑ ΤΟ RASPBERRY PI
+            source = discord.FFmpegPCMAudio(song_url, executable="/usr/bin/ffmpeg", **FFMPEG_OPTIONS)
             vc.play(source, after=lambda e: play_next(guild_id, interaction))
             
             embed = discord.Embed(title="🎶 Τώρα Παίζει", description=f"**{title}**", color=0x1abc9c)
@@ -143,8 +153,8 @@ async def play(interaction: discord.Interaction, query: str):
             await interaction.followup.send(embed=embed, view=view)
 
     except Exception as e:
-        print(e)
-        await interaction.followup.send("❌ Πρόβλημα με το τραγούδι (Ίσως έχει περιορισμό).")
+        print(f"Play Command Error: {e}")
+        await interaction.followup.send("❌ Πρόβλημα με το τραγούδι (Ίσως έχει περιορισμό ή δεν βρέθηκε το FFmpeg).")
 
 @client.event
 async def on_ready():
