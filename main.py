@@ -6,7 +6,7 @@ import os
 import logging
 from dotenv import load_dotenv
 
-# Ενεργοποίηση Logging για να βλέπουμε τα λάθη στα PM2 logs
+# Ενεργοποίηση Logging
 logging.basicConfig(level=logging.INFO)
 
 load_dotenv()
@@ -24,7 +24,16 @@ YTDL_OPTIONS = {
     'default_search': 'auto',
     'source_address': '0.0.0.0',
     'nocheckcertificate': True,
-    'cookiefile': 'cookies.txt', # Χρήση του αρχείου cookies για αποφυγή 403
+    'cookiefile': 'cookies.txt', 
+    # --- ΝΕΕΣ ΡΥΘΜΙΣΕΙΣ ΓΙΑ ΤΟ 403 (Android Client Bypass) ---
+    'extractor_args': {
+        'youtube': {
+            'player_client': ['android', 'ios']
+        }
+    },
+    'http_headers': {
+        'User-Agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36'
+    }
 }
 
 FFMPEG_OPTIONS = {
@@ -65,11 +74,14 @@ def play_next(guild_id, interaction):
         url, title = queues[guild_id].pop(0)
         vc = voice_clients.get(guild_id)
         if vc:
-            # Προσθήκη executable path για το Raspberry Pi
-            source = discord.FFmpegPCMAudio(url, executable="/usr/bin/ffmpeg", **FFMPEG_OPTIONS)
-            vc.play(source, after=lambda e: play_next(guild_id, interaction))
-            coro = interaction.channel.send(f"🎶 Τώρα παίζει: **{title}**")
-            asyncio.run_coroutine_threadsafe(coro, client.loop)
+            try:
+                # Προσοχή: Εδώ είναι το path για το ffmpeg στο Raspberry Pi
+                source = discord.FFmpegPCMAudio(url, executable="/usr/bin/ffmpeg", **FFMPEG_OPTIONS)
+                vc.play(source, after=lambda e: play_next(guild_id, interaction))
+                coro = interaction.channel.send(f"🎶 Τώρα παίζει: **{title}**")
+                asyncio.run_coroutine_threadsafe(coro, client.loop)
+            except Exception as e:
+                print(f"Error in play_next: {e}")
 
 @client.tree.command(name="play", description="Παίζει μουσική")
 async def play(interaction: discord.Interaction, query: str):
@@ -97,7 +109,6 @@ async def play(interaction: discord.Interaction, query: str):
             queues[guild_id].append((song_url, title))
             await interaction.followup.send(f"✅ Προστέθηκε: **{title}**")
         else:
-            # Προσθήκη executable path για το Raspberry Pi
             source = discord.FFmpegPCMAudio(song_url, executable="/usr/bin/ffmpeg", **FFMPEG_OPTIONS)
             vc.play(source, after=lambda e: play_next(guild_id, interaction))
             view = MusicControls(interaction)
