@@ -21,7 +21,7 @@ YTDL_OPTIONS = {
     'format': 'bestaudio/best',
     'noplaylist': True,
     'quiet': True,
-    'default_search': 'auto',
+    'default_search': 'ytsearch', # Αλλαγή σε ytsearch για να βρίσκει πάντα κάτι
     'source_address': '0.0.0.0',
     'nocheckcertificate': True,
     'cookiefile': 'cookies.txt', 
@@ -74,6 +74,7 @@ def play_next(guild_id, interaction):
         vc = voice_clients.get(guild_id)
         if vc:
             try:
+                # Προσοχή: Εδώ είναι το path για το ffmpeg στο Raspberry Pi
                 source = discord.FFmpegPCMAudio(url, executable="/usr/bin/ffmpeg", **FFMPEG_OPTIONS)
                 vc.play(source, after=lambda e: play_next(guild_id, interaction))
                 coro = interaction.channel.send(f"🎶 Τώρα παίζει: **{title}**")
@@ -102,12 +103,12 @@ async def play(interaction: discord.Interaction, query: str):
         # Αναζήτηση με ασφάλεια
         data = await asyncio.get_event_loop().run_in_executor(None, lambda: ytdl.extract_info(query, download=False))
         
-        # ΕΔΩ ΗΤΑΝ ΤΟ ΠΡΟΒΛΗΜΑ: Ελέγχουμε αν βρήκε κάτι πριν πάρουμε το [0]
+        # ΕΛΕΓΧΟΣ ΓΙΑ ΤΟ CRASH (List index out of range)
         if 'entries' in data:
             if len(data['entries']) > 0:
                 data = data['entries'][0]
             else:
-                return await interaction.followup.send("❌ Δεν βρέθηκαν αποτελέσματα. Δοκίμασε άλλο τραγούδι.")
+                return await interaction.followup.send("❌ Δεν βρέθηκαν αποτελέσματα. Δοκίμασε άλλο όνομα.")
         
         song_url = data['url']
         title = data['title']
@@ -117,6 +118,9 @@ async def play(interaction: discord.Interaction, query: str):
             queues[guild_id].append((song_url, title))
             await interaction.followup.send(f"✅ Προστέθηκε: **{title}**")
         else:
+            # Έλεγχος εκτύπωσης URL για debugging (θα φανεί στα logs αν αποτύχει το ffmpeg)
+            print(f"Trying to play: {title} | URL: {song_url}")
+            
             source = discord.FFmpegPCMAudio(song_url, executable="/usr/bin/ffmpeg", **FFMPEG_OPTIONS)
             vc.play(source, after=lambda e: play_next(guild_id, interaction))
             view = MusicControls(interaction)
@@ -124,7 +128,6 @@ async def play(interaction: discord.Interaction, query: str):
 
     except Exception as e:
         print(f"Play Error: {e}")
-        # Αν είναι interaction timeout (επειδή άργησε), δεν πειράζει, το log θα το δείξει.
         try:
             await interaction.followup.send(f"❌ Σφάλμα: {e}")
         except:
