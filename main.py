@@ -6,7 +6,7 @@ import os
 import logging
 from dotenv import load_dotenv
 
-# Ενεργοποίηση Logging
+# Logging
 logging.basicConfig(level=logging.INFO)
 
 load_dotenv()
@@ -16,7 +16,7 @@ intents = discord.Intents.default()
 intents.message_content = True
 client = commands.Bot(command_prefix="!", intents=intents)
 
-# --- MUSIC SETTINGS ---
+# --- MUSIC SETTINGS (ANDROID CLIENT FIX) ---
 YTDL_OPTIONS = {
     'format': 'bestaudio/best',
     'noplaylist': True,
@@ -25,7 +25,6 @@ YTDL_OPTIONS = {
     'source_address': '0.0.0.0',
     'nocheckcertificate': True,
     'cookiefile': 'cookies.txt', 
-    # --- ΝΕΕΣ ΡΥΘΜΙΣΕΙΣ ΓΙΑ ΤΟ 403 (Android Client Bypass) ---
     'extractor_args': {
         'youtube': {
             'player_client': ['android', 'ios']
@@ -75,7 +74,6 @@ def play_next(guild_id, interaction):
         vc = voice_clients.get(guild_id)
         if vc:
             try:
-                # Προσοχή: Εδώ είναι το path για το ffmpeg στο Raspberry Pi
                 source = discord.FFmpegPCMAudio(url, executable="/usr/bin/ffmpeg", **FFMPEG_OPTIONS)
                 vc.play(source, after=lambda e: play_next(guild_id, interaction))
                 coro = interaction.channel.send(f"🎶 Τώρα παίζει: **{title}**")
@@ -92,14 +90,24 @@ async def play(interaction: discord.Interaction, query: str):
         return await interaction.followup.send("❌ Μπες σε ένα voice channel!")
 
     if guild_id not in voice_clients or not voice_clients[guild_id].is_connected():
-        vc = await interaction.user.voice.channel.connect()
-        voice_clients[guild_id] = vc
+        try:
+            vc = await interaction.user.voice.channel.connect()
+            voice_clients[guild_id] = vc
+        except Exception as e:
+            return await interaction.followup.send("❌ Δεν μπορώ να μπω στο κανάλι. Τσέκαρε τα permissions.")
     else:
         vc = voice_clients[guild_id]
 
     try:
+        # Αναζήτηση με ασφάλεια
         data = await asyncio.get_event_loop().run_in_executor(None, lambda: ytdl.extract_info(query, download=False))
-        if 'entries' in data: data = data['entries'][0]
+        
+        # ΕΔΩ ΗΤΑΝ ΤΟ ΠΡΟΒΛΗΜΑ: Ελέγχουμε αν βρήκε κάτι πριν πάρουμε το [0]
+        if 'entries' in data:
+            if len(data['entries']) > 0:
+                data = data['entries'][0]
+            else:
+                return await interaction.followup.send("❌ Δεν βρέθηκαν αποτελέσματα. Δοκίμασε άλλο τραγούδι.")
         
         song_url = data['url']
         title = data['title']
@@ -115,8 +123,12 @@ async def play(interaction: discord.Interaction, query: str):
             await interaction.followup.send(f"🎶 Τώρα παίζει: **{title}**", view=view)
 
     except Exception as e:
-        print(f"Error: {e}")
-        await interaction.followup.send(f"❌ Σφάλμα: {e}")
+        print(f"Play Error: {e}")
+        # Αν είναι interaction timeout (επειδή άργησε), δεν πειράζει, το log θα το δείξει.
+        try:
+            await interaction.followup.send(f"❌ Σφάλμα: {e}")
+        except:
+            pass
 
 @client.event
 async def on_ready():
