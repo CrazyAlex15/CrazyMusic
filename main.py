@@ -16,7 +16,7 @@ intents = discord.Intents.default()
 intents.message_content = True
 client = commands.Bot(command_prefix="!", intents=intents)
 
-# --- MUSIC SETTINGS ---
+# --- MUSIC SETTINGS (iOS Client + Cookies) ---
 YTDL_OPTIONS = {
     'format': 'bestaudio/best',
     'outtmpl': '%(extractor)s-%(id)s-%(title)s.%(ext)s',
@@ -29,13 +29,16 @@ YTDL_OPTIONS = {
     'no_warnings': True,
     'default_search': 'auto',
     'source_address': '0.0.0.0',
-    'cookiefile': 'cookies.txt',
-    # ΠΡΟΣΘΗΚΗ USER AGENT: Λέμε στο YouTube ότι είμαστε κανονικός Browser
-    'http_headers': {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36',
+    'cookiefile': 'cookies.txt', # ΑΠΑΡΑΙΤΗΤΟ
+    # Χρησιμοποιούμε iOS για να αποφύγουμε 403 και DRM
+    'extractor_args': {
+        'youtube': {
+            'player_client': ['ios']
+        }
     }
 }
 
+# Ρυθμίσεις FFMPEG για Raspberry Pi
 FFMPEG_OPTIONS = {
     'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
     'options': '-vn',
@@ -76,6 +79,7 @@ def play_next(guild_id, interaction):
         if vc:
             try:
                 print(f"🔄 Playing Next: {title}")
+                # Σημαντικό: path για το ffmpeg
                 source = discord.FFmpegPCMAudio(url, executable="/usr/bin/ffmpeg", **FFMPEG_OPTIONS)
                 vc.play(source, after=lambda e: play_next(guild_id, interaction))
                 coro = interaction.channel.send(f"🎶 Τώρα παίζει: **{title}**")
@@ -101,7 +105,7 @@ async def play(interaction: discord.Interaction, query: str):
         vc = voice_clients[guild_id]
 
     try:
-        # Χρησιμοποιούμε ytsearch1: για να αποφύγουμε playlists και errors
+        # Χρήση ytsearch1: για να βρίσκει πάντα 1 αποτέλεσμα και να μην κρασάρει
         if not query.startswith("http"):
             search_query = f"ytsearch1:{query}"
         else:
@@ -128,7 +132,6 @@ async def play(interaction: discord.Interaction, query: str):
         else:
             source = discord.FFmpegPCMAudio(song_url, executable="/usr/bin/ffmpeg", **FFMPEG_OPTIONS)
             vc.play(source, after=lambda e: play_next(guild_id, interaction))
-            
             view = MusicControls(interaction)
             await interaction.followup.send(f"🎶 Τώρα παίζει: **{title}**", view=view)
 
