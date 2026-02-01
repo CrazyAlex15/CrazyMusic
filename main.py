@@ -6,7 +6,7 @@ import os
 import logging
 from dotenv import load_dotenv
 
-# Logging Setup
+# Logging
 logging.basicConfig(level=logging.INFO)
 
 load_dotenv()
@@ -17,25 +17,24 @@ intents.message_content = True
 client = commands.Bot(command_prefix="!", intents=intents)
 
 # --- MUSIC SETTINGS ---
+# Αφαιρέσαμε το "Android" client γιατί σου έβγαζε DRM errors.
+# Τώρα βασιζόμαστε στο cookies.txt και σε πιο συμβατά formats.
 YTDL_OPTIONS = {
     'format': 'bestaudio/best',
+    'outtmpl': '%(extractor)s-%(id)s-%(title)s.%(ext)s',
+    'restrictfilenames': True,
     'noplaylist': True,
-    'quiet': True,
-    'default_search': 'ytsearch', # ΑΛΛΑΓΗ: Force search για να βρίσκει λίστα
-    'source_address': '0.0.0.0',
     'nocheckcertificate': True,
-    'cookiefile': 'cookies.txt', 
-    'extractor_args': {
-        'youtube': {
-            'player_client': ['android', 'ios']
-        }
-    },
-    'http_headers': {
-        'User-Agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36'
-    }
+    'ignoreerrors': False,
+    'logtostderr': False,
+    'quiet': True,
+    'no_warnings': True,
+    'default_search': 'auto',
+    'source_address': '0.0.0.0',
+    'cookiefile': 'cookies.txt', # ΒΑΣΙΚΟ: Χωρίς αυτό τρώμε 403
 }
 
-# Ρυθμίσεις FFmpeg για Raspberry Pi
+# Ρυθμίσεις FFmpeg για Raspberry Pi 4
 FFMPEG_OPTIONS = {
     'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
     'options': '-vn',
@@ -75,14 +74,13 @@ def play_next(guild_id, interaction):
         vc = voice_clients.get(guild_id)
         if vc:
             try:
-                print(f"Playing Next: {title}") # Debug Log
+                print(f"🔄 Playing Next: {title}")
                 source = discord.FFmpegPCMAudio(url, executable="/usr/bin/ffmpeg", **FFMPEG_OPTIONS)
                 vc.play(source, after=lambda e: play_next(guild_id, interaction))
-                
                 coro = interaction.channel.send(f"🎶 Τώρα παίζει: **{title}**")
                 asyncio.run_coroutine_threadsafe(coro, client.loop)
             except Exception as e:
-                print(f"Error in play_next: {e}")
+                print(f"❌ Error in play_next: {e}")
 
 @client.tree.command(name="play", description="Παίζει μουσική")
 async def play(interaction: discord.Interaction, query: str):
@@ -92,7 +90,6 @@ async def play(interaction: discord.Interaction, query: str):
     if not interaction.user.voice:
         return await interaction.followup.send("❌ Μπες σε ένα voice channel!")
 
-    # Σύνδεση στο Voice Channel
     if guild_id not in voice_clients or not voice_clients[guild_id].is_connected():
         try:
             vc = await interaction.user.voice.channel.connect()
@@ -103,26 +100,36 @@ async def play(interaction: discord.Interaction, query: str):
         vc = voice_clients[guild_id]
 
     try:
-        # Αναζήτηση
-        print(f"Searching for: {query}") # Debug Log
-        data = await asyncio.get_event_loop().run_in_executor(None, lambda: ytdl.extract_info(query, download=False))
+        # 1. Διόρθωση Αναζήτησης: Αν δεν είναι link, το κάνουμε 'ytsearch1:'
+        # Αυτό λέει στο YouTube "Δώσε μου το πρώτο αποτέλεσμα" και αποφεύγει τις λίστες
+        if not query.startswith("http"):
+            search_query = f"ytsearch1:{query}"
+        else:
+            search_query = query
+
+        print(f"🔎 Searching for: {search_query}")
         
-        # --- Η ΔΙΟΡΘΩΣΗ ΓΙΑ ΤΟ CRASH ---
+        data = await asyncio.get_event_loop().run_in_executor(None, lambda: ytdl.extract_info(search_query, download=False))
+        
+        # 2. Έξυπνη Εξαγωγή Δεδομένων
         if 'entries' in data:
+            # Αν επέστρεψε λίστα (λόγω αναζήτησης)
             if len(data['entries']) > 0:
                 data = data['entries'][0]
             else:
-                return await interaction.followup.send("❌ Δεν βρέθηκαν αποτελέσματα. Δοκίμασε άλλη λέξη.")
+                return await interaction.followup.send("❌ Δεν βρέθηκε κανένα τραγούδι.")
         
+        # Αν όλα πήγαν καλά
         song_url = data['url']
         title = data['title']
-        print(f"Found URL: {song_url}") # Debug Log για να δούμε αν το Link είναι valid
+        print(f"✅ Found: {title} | URL: {song_url[:30]}...") # Log για επιβεβαίωση
 
         if vc.is_playing() or vc.is_paused():
             if guild_id not in queues: queues[guild_id] = []
             queues[guild_id].append((song_url, title))
             await interaction.followup.send(f"✅ Προστέθηκε: **{title}**")
         else:
+            print("▶️ Attempting to verify FFMPEG...")
             source = discord.FFmpegPCMAudio(song_url, executable="/usr/bin/ffmpeg", **FFMPEG_OPTIONS)
             vc.play(source, after=lambda e: play_next(guild_id, interaction))
             
@@ -130,7 +137,7 @@ async def play(interaction: discord.Interaction, query: str):
             await interaction.followup.send(f"🎶 Τώρα παίζει: **{title}**", view=view)
 
     except Exception as e:
-        print(f"Play Command Error: {e}")
+        print(f"❌ Play Error: {e}")
         try:
             await interaction.followup.send(f"❌ Σφάλμα: {e}")
         except:
