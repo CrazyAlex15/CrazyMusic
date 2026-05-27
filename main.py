@@ -28,6 +28,29 @@ if not TOKEN:
 FFMPEG_EXECUTABLE = shutil.which('ffmpeg') or '/usr/bin/ffmpeg'
 IDLE_TIMEOUT = 300  # seconds before auto-disconnect when idle
 
+# ── Opus loading (required for voice audio encoding on RPi4) ──────────────────
+def _load_opus() -> None:
+    if discord.opus.is_loaded():
+        log.info('Opus already loaded')
+        return
+    candidates = [
+        'libopus.so.0',
+        'libopus.so',
+        '/usr/lib/aarch64-linux-gnu/libopus.so.0',  # RPi4 64-bit
+        '/usr/lib/arm-linux-gnueabihf/libopus.so.0',  # RPi4 32-bit
+        'opus',
+    ]
+    for lib in candidates:
+        try:
+            discord.opus.load_opus(lib)
+            log.info('Opus loaded from: %s', lib)
+            return
+        except Exception:
+            continue
+    log.error('Could not load opus — voice audio will NOT work. Run: sudo apt install libopus0')
+
+_load_opus()
+
 YTDL_OPTIONS = {
     # Simple selector — works across all clients
     'format': 'bestaudio/best',
@@ -206,6 +229,10 @@ async def _play_next(guild_id: int, channel) -> None:
     song = state.queue.pop(0)
     state.current = song
     state.idle_since = None  # reset idle timer while playing
+
+    log.info('[guild %d] Attempting to play: %s', guild_id, song.title)
+    log.info('[guild %d] Stream URL: %s…', guild_id, song.stream_url[:60])
+    log.info('[guild %d] FFmpeg: %s  |  Opus loaded: %s', guild_id, FFMPEG_EXECUTABLE, discord.opus.is_loaded())
 
     try:
         source = build_source(song, state.volume)
