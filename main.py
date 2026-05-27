@@ -540,9 +540,21 @@ async def on_app_command_error(
 # ── Events ────────────────────────────────────────────────────────────────────
 @bot.event
 async def on_ready():
-    await bot.tree.sync()
+    synced = await bot.tree.sync()
     asyncio.create_task(_idle_watcher())
-    log.info('🎧 Online as %s  |  ffmpeg: %s', bot.user, FFMPEG_EXECUTABLE)
+    log.info('🎧 Online as %s  |  ffmpeg: %s  |  synced %d commands',
+             bot.user, FFMPEG_EXECUTABLE, len(synced))
+
+
+# ── Manual sync command (prefix: !) ──────────────────────────────────────────
+@bot.command(name='sync')
+@commands.is_owner()
+async def sync_cmd(ctx: commands.Context):
+    """Force-sync slash commands to this guild immediately."""
+    bot.tree.copy_global_to(guild=ctx.guild)
+    synced = await bot.tree.sync(guild=ctx.guild)
+    await ctx.send(f'✅ Synced **{len(synced)}** commands to this server.')
+    log.info('Manual guild sync: %d commands → guild %d', len(synced), ctx.guild.id)
 
 
 bot.run(TOKEN)
