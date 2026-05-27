@@ -29,7 +29,8 @@ FFMPEG_EXECUTABLE = shutil.which('ffmpeg') or '/usr/bin/ffmpeg'
 IDLE_TIMEOUT = 300  # seconds before auto-disconnect when idle
 
 YTDL_OPTIONS = {
-    'format': 'bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio[ext=opus]/bestaudio/best',
+    # Simple selector — works across all clients
+    'format': 'bestaudio/best',
     'restrictfilenames': True,
     'noplaylist': True,
     'nocheckcertificate': True,
@@ -39,8 +40,8 @@ YTDL_OPTIONS = {
     'default_search': 'auto',
     'source_address': '0.0.0.0',
     'cookiefile': 'cookies.txt',
-    # iOS client avoids 403 / DRM blocks
-    'extractor_args': {'youtube': {'player_client': ['ios']}},
+    # Try ios first (avoids 403/DRM), fall back to android then web
+    'extractor_args': {'youtube': {'player_client': ['ios', 'android', 'web']}},
 }
 
 FFMPEG_OPTIONS = {
