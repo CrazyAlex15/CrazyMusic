@@ -1,5 +1,4 @@
-discord.py[voice]
+discord.py[voice]==2.3.2
 yt-dlp
 python-dotenv
 PyNaCl
-davey
