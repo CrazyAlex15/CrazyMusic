@@ -303,7 +303,11 @@ class PlayerView(discord.ui.View):
 # ── Slash commands ────────────────────────────────────────────────────────────
 @bot.tree.command(name='play', description='Play a song or add it to the queue')
 async def play_cmd(interaction: discord.Interaction, query: str):
-    await interaction.response.defer()
+    try:
+        await interaction.response.defer()
+    except discord.errors.NotFound:
+        # Interaction token expired (>3 s since user clicked) — silently drop
+        return
     guild_id = interaction.guild.id
     state = get_state(guild_id)
 
@@ -478,6 +482,31 @@ async def disconnect_cmd(interaction: discord.Interaction):
     await state.vc.disconnect()
     state.vc = None
     await interaction.response.send_message('👋 Disconnected.')
+
+
+# ── Global error handler ──────────────────────────────────────────────────────
+@bot.tree.error
+async def on_app_command_error(
+    interaction: discord.Interaction,
+    error: discord.app_commands.AppCommandError,
+) -> None:
+    original = getattr(error, 'original', error)
+
+    # Stale interaction (Discord's 3-second window missed) — nothing we can do
+    if isinstance(original, discord.errors.NotFound) and original.code == 10062:
+        log.warning('Interaction expired before response (10062) — likely RPi lag or user retried')
+        return
+
+    log.error('App command error: %s', error)
+
+    msg = f'❌ Something went wrong: {original}'
+    try:
+        if not interaction.response.is_done():
+            await interaction.response.send_message(msg, ephemeral=True)
+        else:
+            await interaction.followup.send(msg, ephemeral=True)
+    except Exception:
+        pass  # interaction is truly dead — log already captured it
 
 
 # ── Events ────────────────────────────────────────────────────────────────────
