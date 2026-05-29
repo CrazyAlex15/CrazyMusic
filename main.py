@@ -1,8 +1,10 @@
+import os
+os.environ['PATH'] = '/usr/bin:/usr/local/bin:/bin:' + os.environ.get('PATH', '')
+
 import discord
 from discord.ext import commands
 import yt_dlp
 import asyncio
-import os
 import logging
 import shutil
 import time
@@ -24,11 +26,10 @@ TOKEN = os.getenv('DISCORD_TOKEN')
 if not TOKEN:
     raise RuntimeError('DISCORD_TOKEN not found — add it to your .env file.')
 
-# Auto-detect ffmpeg: prefer system PATH, fall back to RPi4 fixed path
 FFMPEG_EXECUTABLE = shutil.which('ffmpeg') or '/usr/bin/ffmpeg'
-IDLE_TIMEOUT = 300  # seconds before auto-disconnect when idle
+IDLE_TIMEOUT = 300
 
-# ── Opus loading (required for voice audio encoding on RPi4) ──────────────────
+# ── Opus loading ──────────────────────────────────────────────────────────────
 def _load_opus() -> None:
     if discord.opus.is_loaded():
         log.info('Opus already loaded')
@@ -36,8 +37,8 @@ def _load_opus() -> None:
     candidates = [
         'libopus.so.0',
         'libopus.so',
-        '/usr/lib/aarch64-linux-gnu/libopus.so.0',  # RPi4 64-bit
-        '/usr/lib/arm-linux-gnueabihf/libopus.so.0',  # RPi4 32-bit
+        '/usr/lib/aarch64-linux-gnu/libopus.so.0',
+        '/usr/lib/arm-linux-gnueabihf/libopus.so.0',
         'opus',
     ]
     for lib in candidates:
@@ -51,10 +52,7 @@ def _load_opus() -> None:
 
 _load_opus()
 
-# ── JS runtime detection (REQUIRED by yt-dlp for YouTube as of late 2025) ─────
-# YouTube extraction now needs a JavaScript engine to solve the "n-challenge"
-# signature. Without one, yt-dlp returns 403 / no formats. We auto-detect deno
-# (yt-dlp's default/preferred) or node, and tell yt-dlp explicitly which to use.
+# ── JS runtime detection ──────────────────────────────────────────────────────
 def _detect_js_runtime() -> Optional[dict]:
     for runtime in ('deno', 'node', 'bun'):
         path = shutil.which(runtime)
@@ -62,21 +60,23 @@ def _detect_js_runtime() -> Optional[dict]:
             log.info('JS runtime detected: %s (%s)', runtime, path)
             return {runtime: {}}
     log.error(
-        'No JS runtime (deno/node) found — YouTube extraction WILL fail with 403. '
-        'Install one:  sudo apt install nodejs   (or install deno)'
+        'No JS runtime (deno/node) found — YouTube extraction WILL fail. '
+        'Install one:  sudo apt install nodejs'
     )
     return None
 
 JS_RUNTIMES = _detect_js_runtime()
 
-# Only pass a cookie file if it actually exists (avoids a hard error otherwise).
 COOKIE_FILE = 'cookies.txt' if os.path.isfile('cookies.txt') else None
 if COOKIE_FILE:
     log.info('Using cookies file: %s', COOKIE_FILE)
 else:
-    log.info('No cookies.txt found — running without cookies (fine for most public videos)')
+    log.info('No cookies.txt found — running without cookies')
 
 # ── yt-dlp options ────────────────────────────────────────────────────────────
+# NOTE: ytdl_client is intentionally NOT created at module level.
+# It must be created fresh inside resolve_song() so that the PATH patch
+# at the top of this file is already active when yt-dlp spawns node.
 YTDL_OPTIONS = {
     'format': 'bestaudio/best',
     'restrictfilenames': True,
@@ -89,11 +89,8 @@ YTDL_OPTIONS = {
     'source_address': '0.0.0.0',
     'retries': 5,
     'extractor_retries': 3,
-    # FIX 2026: 'ios'/'android' clients are dead (403 + ignore cookies).
-    # 'web'/'mweb' honour cookies and work with a JS runtime; 'tv' is a backup.
     'extractor_args': {'youtube': {'player_client': ['web', 'mweb', 'tv']}},
 }
-# FIX 2026: tell yt-dlp which JS engine to use (only deno is on by default).
 if JS_RUNTIMES:
     YTDL_OPTIONS['js_runtimes'] = JS_RUNTIMES
 if COOKIE_FILE:
@@ -127,16 +124,16 @@ class Song:
 
 
 class GuildState:
-    """All music state isolated per guild — no shared globals."""
+    """All music state isolated per guild."""
 
     def __init__(self) -> None:
         self.queue: list[Song] = []
         self.current: Optional[Song] = None
         self.vc: Optional[discord.VoiceClient] = None
-        self.volume: float = 0.5       # 0.0 – 1.5
-        self.loop: str = 'off'         # 'off' | 'one' | 'all'
+        self.volume: float = 0.5
+        self.loop: str = 'off'
         self.idle_since: Optional[float] = None
-        self._skip_flag: bool = False  # True when skip was explicitly requested
+        self._skip_flag: bool = False
 
     @property
     def is_playing(self) -> bool:
@@ -151,14 +148,12 @@ class GuildState:
         return self.is_playing or self.is_paused
 
     def skip(self) -> None:
-        """Stop current track and signal that this was a deliberate skip."""
         if self.vc and self.is_active:
             self._skip_flag = True
             self.vc.stop()
 
 
 # ── Globals ───────────────────────────────────────────────────────────────────
-ytdl_client = yt_dlp.YoutubeDL(YTDL_OPTIONS)
 _states: dict[int, GuildState] = {}
 
 
@@ -170,26 +165,28 @@ def get_state(guild_id: int) -> GuildState:
 
 # ── Bot setup ─────────────────────────────────────────────────────────────────
 intents = discord.Intents.default()
-intents.message_content = True  # needed for the "!sync" prefix command
+intents.message_content = True
 bot = commands.Bot(command_prefix='!', intents=intents)
 
 
 # ── Audio helpers ─────────────────────────────────────────────────────────────
 class ExtractError(Exception):
-    """Raised when yt-dlp errors out (vs. simply finding no results)."""
+    """Raised when yt-dlp errors out."""
 
 
 async def resolve_song(query: str, requester: str) -> Optional[Song]:
     """Fetch song metadata from YouTube in an executor (non-blocking).
 
-    Returns a Song, or None if there were simply no results.
-    Raises ExtractError if yt-dlp itself failed (network / 403 / JS runtime).
+    Creates a fresh YoutubeDL instance each call so the PATH patch at the
+    top of the file is active when yt-dlp spawns the node subprocess.
     """
     search = query if query.startswith('http') else f'ytsearch1:{query}'
     loop = asyncio.get_running_loop()
+    log.info('🔎 Searching for: %s', search)
     try:
         data = await loop.run_in_executor(
-            None, lambda: ytdl_client.extract_info(search, download=False)
+            None,
+            lambda: yt_dlp.YoutubeDL(YTDL_OPTIONS).extract_info(search, download=False)
         )
     except Exception as exc:
         log.error('yt-dlp error: %s', exc)
@@ -203,7 +200,6 @@ async def resolve_song(query: str, requester: str) -> Optional[Song]:
             return None
         data = entries[0]
 
-    # Resolve the actual streamable URL (newer yt-dlp may nest it in formats).
     stream_url = data.get('url')
     if not stream_url and data.get('formats'):
         audio = [f for f in data['formats'] if f.get('acodec') not in (None, 'none') and f.get('url')]
@@ -247,17 +243,14 @@ def build_np_embed(song: Song, state: GuildState) -> discord.Embed:
 
 # ── Playback engine ───────────────────────────────────────────────────────────
 def _after_song(guild_id: int, channel, error: Optional[Exception]) -> None:
-    """Called by discord.py (audio thread) when a track ends or is stopped."""
     if error:
         log.error('Playback error guild %d: %s', guild_id, error)
     asyncio.run_coroutine_threadsafe(_play_next(guild_id, channel), bot.loop)
 
 
 async def _play_next(guild_id: int, channel) -> None:
-    """Advance the queue and start the next song."""
     state = get_state(guild_id)
 
-    # Skip flag bypasses loop so explicit skips always advance
     if state._skip_flag:
         state._skip_flag = False
     else:
@@ -278,11 +271,11 @@ async def _play_next(guild_id: int, channel) -> None:
 
     song = state.queue.pop(0)
     state.current = song
-    state.idle_since = None  # reset idle timer while playing
+    state.idle_since = None
 
     log.info('[guild %d] Attempting to play: %s', guild_id, song.title)
     log.info('[guild %d] Stream URL: %s…', guild_id, song.stream_url[:60])
-    log.info('[guild %d] FFmpeg: %s  |  Opus loaded: %s', guild_id, FFMPEG_EXECUTABLE, discord.opus.is_loaded())
+    log.info('[guild %d] FFmpeg: %s  |  Opus: %s', guild_id, FFMPEG_EXECUTABLE, discord.opus.is_loaded())
 
     try:
         source = build_source(song, state.volume)
@@ -294,12 +287,11 @@ async def _play_next(guild_id: int, channel) -> None:
     except Exception as exc:
         log.error('[guild %d] _play_next error: %s', guild_id, exc)
         await channel.send(f'❌ Error playing **{song.title}**: {exc}')
-        await _play_next(guild_id, channel)  # try the next song
+        await _play_next(guild_id, channel)
 
 
 # ── Idle watcher ──────────────────────────────────────────────────────────────
 async def _idle_watcher() -> None:
-    """Disconnect from voice after IDLE_TIMEOUT seconds of silence."""
     while True:
         await asyncio.sleep(30)
         for guild_id, state in list(_states.items()):
@@ -384,7 +376,6 @@ async def play_cmd(interaction: discord.Interaction, query: str):
     try:
         await interaction.response.defer()
     except discord.errors.NotFound:
-        # Interaction token expired (>3 s since user clicked) — silently drop
         return
     guild_id = interaction.guild.id
     state = get_state(guild_id)
@@ -392,7 +383,6 @@ async def play_cmd(interaction: discord.Interaction, query: str):
     if not interaction.user.voice:
         return await interaction.followup.send('❌ Join a voice channel first!')
 
-    # Connect, move, or reuse existing voice client
     if not state.vc or not state.vc.is_connected():
         try:
             state.vc = await interaction.user.voice.channel.connect()
@@ -407,16 +397,12 @@ async def play_cmd(interaction: discord.Interaction, query: str):
     except ExtractError as exc:
         log.error('Extraction failed: %s', exc)
         return await interaction.followup.send(
-            '❌ YouTube extraction failed. This is almost always one of:\n'
-            '• `yt-dlp` is out of date → run `pip install -U yt-dlp` and restart the bot\n'
-            '• No JS runtime installed → run `sudo apt install nodejs`\n'
-            f'\n_Details: {str(exc)[:300]}_'
+            f'❌ Play Error: {str(exc)[:300]}'
         )
     if not song:
         return await interaction.followup.send('❌ Could not find that song.')
 
     if state.is_active:
-        # Already playing — add to queue
         state.queue.append(song)
         embed = discord.Embed(
             title='✅ Added to Queue',
@@ -430,7 +416,6 @@ async def play_cmd(interaction: discord.Interaction, query: str):
             embed.set_thumbnail(url=song.thumbnail)
         return await interaction.followup.send(embed=embed)
 
-    # Nothing playing — start immediately
     state.queue.append(song)
     await interaction.followup.send(f'▶️ Starting **{song.title}**…', ephemeral=True)
     await _play_next(guild_id, interaction.channel)
@@ -475,7 +460,6 @@ async def volume_cmd(interaction: discord.Interaction, level: int):
         return await interaction.response.send_message('❌ Volume must be between 0 and 150.', ephemeral=True)
     state = get_state(interaction.guild.id)
     state.volume = level / 100
-    # Apply immediately if something is playing
     if (
         state.vc
         and state.is_active
@@ -579,9 +563,8 @@ async def on_app_command_error(
 ) -> None:
     original = getattr(error, 'original', error)
 
-    # Stale interaction (Discord's 3-second window missed) — nothing we can do
     if isinstance(original, discord.errors.NotFound) and original.code == 10062:
-        log.warning('Interaction expired before response (10062) — likely RPi lag or user retried')
+        log.warning('Interaction expired (10062)')
         return
 
     log.error('App command error: %s', error)
@@ -593,13 +576,12 @@ async def on_app_command_error(
         else:
             await interaction.followup.send(msg, ephemeral=True)
     except Exception:
-        pass  # interaction is truly dead — log already captured it
+        pass
 
 
 # ── Events ────────────────────────────────────────────────────────────────────
 @bot.event
 async def on_ready():
-    # FIX: sync per-guild so commands appear INSTANTLY (global sync can take ~1h).
     total = 0
     for guild in bot.guilds:
         try:
@@ -608,7 +590,6 @@ async def on_ready():
             total += len(synced)
         except Exception as exc:
             log.warning('Guild sync failed for %s: %s', guild.id, exc)
-    # Also push a global sync so new guilds eventually get the commands too.
     try:
         await bot.tree.sync()
     except Exception as exc:
@@ -622,11 +603,10 @@ async def on_ready():
     )
 
 
-# ── Manual sync command (prefix: !) ──────────────────────────────────────────
+# ── Manual sync command ───────────────────────────────────────────────────────
 @bot.command(name='sync')
 @commands.is_owner()
 async def sync_cmd(ctx: commands.Context):
-    """Force-sync slash commands to this guild immediately."""
     bot.tree.copy_global_to(guild=ctx.guild)
     synced = await bot.tree.sync(guild=ctx.guild)
     await ctx.send(f'✅ Synced **{len(synced)}** commands to this server.')
