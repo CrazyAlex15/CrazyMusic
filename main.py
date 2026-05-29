@@ -74,11 +74,10 @@ else:
     log.info('No cookies.txt found — running without cookies')
 
 # ── yt-dlp options ────────────────────────────────────────────────────────────
-# NOTE: ytdl_client is intentionally NOT created at module level.
-# It must be created fresh inside resolve_song() so that the PATH patch
-# at the top of this file is already active when yt-dlp spawns node.
 YTDL_OPTIONS = {
-    'format': 'bestaudio/best',
+    # Accept bestaudio, fall back to combined stream (format 18 = 360p+audio)
+    # so SABR-only clients never leave us with zero matches.
+    'format': 'bestaudio/best/bestaudio*[ext=m4a]/bestaudio*[ext=webm]/18',
     'restrictfilenames': True,
     'noplaylist': True,
     'nocheckcertificate': True,
@@ -89,7 +88,10 @@ YTDL_OPTIONS = {
     'source_address': '0.0.0.0',
     'retries': 5,
     'extractor_retries': 3,
-    'extractor_args': {'youtube': {'player_client': ['web', 'mweb', 'tv']}},
+    # web  — standard browser client, respects cookies
+    # tv   — reliable fallback, not SABR-gated
+    # android_vr — returns clean audio formats without SABR restrictions
+    'extractor_args': {'youtube': {'player_client': ['web', 'tv', 'android_vr']}},
 }
 if JS_RUNTIMES:
     YTDL_OPTIONS['js_runtimes'] = JS_RUNTIMES
@@ -103,6 +105,16 @@ FFMPEG_OPTIONS = {
 
 COLOR = 0x7289DA
 LOOP_LABELS = {'off': '➡️ Off', 'one': '🔂 One', 'all': '🔁 All'}
+
+
+# Shared instance — created on first use (after PATH patch is active)
+_ytdl_client: Optional[yt_dlp.YoutubeDL] = None
+
+def get_ytdl() -> yt_dlp.YoutubeDL:
+    global _ytdl_client
+    if _ytdl_client is None:
+        _ytdl_client = yt_dlp.YoutubeDL(YTDL_OPTIONS)
+    return _ytdl_client
 
 
 # ── Data models ───────────────────────────────────────────────────────────────
@@ -175,18 +187,14 @@ class ExtractError(Exception):
 
 
 async def resolve_song(query: str, requester: str) -> Optional[Song]:
-    """Fetch song metadata from YouTube in an executor (non-blocking).
-
-    Creates a fresh YoutubeDL instance each call so the PATH patch at the
-    top of the file is active when yt-dlp spawns the node subprocess.
-    """
+    """Fetch song metadata from YouTube in an executor (non-blocking)."""
     search = query if query.startswith('http') else f'ytsearch1:{query}'
     loop = asyncio.get_running_loop()
     log.info('🔎 Searching for: %s', search)
     try:
         data = await loop.run_in_executor(
             None,
-            lambda: yt_dlp.YoutubeDL(YTDL_OPTIONS).extract_info(search, download=False)
+            lambda: get_ytdl().extract_info(search, download=False)
         )
     except Exception as exc:
         log.error('yt-dlp error: %s', exc)
@@ -396,9 +404,7 @@ async def play_cmd(interaction: discord.Interaction, query: str):
         song = await resolve_song(query, str(interaction.user))
     except ExtractError as exc:
         log.error('Extraction failed: %s', exc)
-        return await interaction.followup.send(
-            f'❌ Play Error: {str(exc)[:300]}'
-        )
+        return await interaction.followup.send(f'❌ Play Error: {str(exc)[:300]}')
     if not song:
         return await interaction.followup.send('❌ Could not find that song.')
 
