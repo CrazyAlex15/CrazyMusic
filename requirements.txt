@@ -1,4 +1,4 @@
 discord.py[voice]==2.3.2
-yt-dlp
+yt-dlp>=2026.1.29
 python-dotenv
 PyNaCl

@@ -51,8 +51,33 @@ def _load_opus() -> None:
 
 _load_opus()
 
+# ── JS runtime detection (REQUIRED by yt-dlp for YouTube as of late 2025) ─────
+# YouTube extraction now needs a JavaScript engine to solve the "n-challenge"
+# signature. Without one, yt-dlp returns 403 / no formats. We auto-detect deno
+# (yt-dlp's default/preferred) or node, and tell yt-dlp explicitly which to use.
+def _detect_js_runtime() -> Optional[dict]:
+    for runtime in ('deno', 'node', 'bun'):
+        path = shutil.which(runtime)
+        if path:
+            log.info('JS runtime detected: %s (%s)', runtime, path)
+            return {runtime: {}}
+    log.error(
+        'No JS runtime (deno/node) found — YouTube extraction WILL fail with 403. '
+        'Install one:  sudo apt install nodejs   (or install deno)'
+    )
+    return None
+
+JS_RUNTIMES = _detect_js_runtime()
+
+# Only pass a cookie file if it actually exists (avoids a hard error otherwise).
+COOKIE_FILE = 'cookies.txt' if os.path.isfile('cookies.txt') else None
+if COOKIE_FILE:
+    log.info('Using cookies file: %s', COOKIE_FILE)
+else:
+    log.info('No cookies.txt found — running without cookies (fine for most public videos)')
+
+# ── yt-dlp options ────────────────────────────────────────────────────────────
 YTDL_OPTIONS = {
-    # Simple selector — works across all clients
     'format': 'bestaudio/best',
     'restrictfilenames': True,
     'noplaylist': True,
@@ -62,10 +87,17 @@ YTDL_OPTIONS = {
     'no_warnings': True,
     'default_search': 'auto',
     'source_address': '0.0.0.0',
-    'cookiefile': 'cookies.txt',
-    # Try ios first (avoids 403/DRM), fall back to android then web
-    'extractor_args': {'youtube': {'player_client': ['ios', 'android', 'web']}},
+    'retries': 5,
+    'extractor_retries': 3,
+    # FIX 2026: 'ios'/'android' clients are dead (403 + ignore cookies).
+    # 'web'/'mweb' honour cookies and work with a JS runtime; 'tv' is a backup.
+    'extractor_args': {'youtube': {'player_client': ['web', 'mweb', 'tv']}},
 }
+# FIX 2026: tell yt-dlp which JS engine to use (only deno is on by default).
+if JS_RUNTIMES:
+    YTDL_OPTIONS['js_runtimes'] = JS_RUNTIMES
+if COOKIE_FILE:
+    YTDL_OPTIONS['cookiefile'] = COOKIE_FILE
 
 FFMPEG_OPTIONS = {
     'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
@@ -138,13 +170,21 @@ def get_state(guild_id: int) -> GuildState:
 
 # ── Bot setup ─────────────────────────────────────────────────────────────────
 intents = discord.Intents.default()
-intents.message_content = True
+intents.message_content = True  # needed for the "!sync" prefix command
 bot = commands.Bot(command_prefix='!', intents=intents)
 
 
 # ── Audio helpers ─────────────────────────────────────────────────────────────
+class ExtractError(Exception):
+    """Raised when yt-dlp errors out (vs. simply finding no results)."""
+
+
 async def resolve_song(query: str, requester: str) -> Optional[Song]:
-    """Fetch song metadata from YouTube in an executor (non-blocking)."""
+    """Fetch song metadata from YouTube in an executor (non-blocking).
+
+    Returns a Song, or None if there were simply no results.
+    Raises ExtractError if yt-dlp itself failed (network / 403 / JS runtime).
+    """
     search = query if query.startswith('http') else f'ytsearch1:{query}'
     loop = asyncio.get_running_loop()
     try:
@@ -153,17 +193,27 @@ async def resolve_song(query: str, requester: str) -> Optional[Song]:
         )
     except Exception as exc:
         log.error('yt-dlp error: %s', exc)
-        return None
+        raise ExtractError(str(exc)) from exc
 
     if not data:
         return None
     if 'entries' in data:
-        if not data['entries']:
+        entries = [e for e in data['entries'] if e]
+        if not entries:
             return None
-        data = data['entries'][0]
+        data = entries[0]
+
+    # Resolve the actual streamable URL (newer yt-dlp may nest it in formats).
+    stream_url = data.get('url')
+    if not stream_url and data.get('formats'):
+        audio = [f for f in data['formats'] if f.get('acodec') not in (None, 'none') and f.get('url')]
+        if audio:
+            stream_url = audio[-1]['url']
+    if not stream_url:
+        raise ExtractError('No playable audio stream returned by YouTube.')
 
     return Song(
-        stream_url=data['url'],
+        stream_url=stream_url,
         title=data.get('title', 'Unknown'),
         webpage_url=data.get('webpage_url', ''),
         duration=data.get('duration'),
@@ -352,7 +402,16 @@ async def play_cmd(interaction: discord.Interaction, query: str):
     elif state.vc.channel != interaction.user.voice.channel:
         await state.vc.move_to(interaction.user.voice.channel)
 
-    song = await resolve_song(query, str(interaction.user))
+    try:
+        song = await resolve_song(query, str(interaction.user))
+    except ExtractError as exc:
+        log.error('Extraction failed: %s', exc)
+        return await interaction.followup.send(
+            '❌ YouTube extraction failed. This is almost always one of:\n'
+            '• `yt-dlp` is out of date → run `pip install -U yt-dlp` and restart the bot\n'
+            '• No JS runtime installed → run `sudo apt install nodejs`\n'
+            f'\n_Details: {str(exc)[:300]}_'
+        )
     if not song:
         return await interaction.followup.send('❌ Could not find that song.')
 
@@ -540,10 +599,27 @@ async def on_app_command_error(
 # ── Events ────────────────────────────────────────────────────────────────────
 @bot.event
 async def on_ready():
-    synced = await bot.tree.sync()
+    # FIX: sync per-guild so commands appear INSTANTLY (global sync can take ~1h).
+    total = 0
+    for guild in bot.guilds:
+        try:
+            bot.tree.copy_global_to(guild=guild)
+            synced = await bot.tree.sync(guild=guild)
+            total += len(synced)
+        except Exception as exc:
+            log.warning('Guild sync failed for %s: %s', guild.id, exc)
+    # Also push a global sync so new guilds eventually get the commands too.
+    try:
+        await bot.tree.sync()
+    except Exception as exc:
+        log.warning('Global sync failed: %s', exc)
+
     asyncio.create_task(_idle_watcher())
-    log.info('🎧 Online as %s  |  ffmpeg: %s  |  synced %d commands',
-             bot.user, FFMPEG_EXECUTABLE, len(synced))
+    log.info(
+        '🎧 Online as %s | ffmpeg: %s | opus: %s | JS runtime: %s | cookies: %s | synced %d cmds across %d guild(s)',
+        bot.user, FFMPEG_EXECUTABLE, discord.opus.is_loaded(),
+        bool(JS_RUNTIMES), bool(COOKIE_FILE), total, len(bot.guilds),
+    )
 
 
 # ── Manual sync command (prefix: !) ──────────────────────────────────────────
