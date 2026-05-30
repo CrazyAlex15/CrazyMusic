@@ -2,10 +2,15 @@ __pycache__/
 *.pyc
 venv/
 env/
+.venv/
 .env
+.env.*
+*.env.txt
+cookies.txt
+.ruff_cache/
+graphify-out/
 .DS_Store
 Thumbs.db
 *.mp3
 *.webm
 *.m4a
-graphify-out/
